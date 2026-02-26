@@ -234,7 +234,7 @@ def parse_openapi_document(
                     host=forms.host or host_forms.host,
                     query_params=query_params,
                     path_params=all_path_params,
-                    request_headers={k: v for k, v in header_params.items() if v is not None},
+                    request_headers={k: (v if v is not None else "") for k, v in header_params.items()},
                     request_content_type=request_content_type,
                     request_body=request_example,
                     request_body_schema=request_schema if isinstance(request_schema, dict) else None,
@@ -273,6 +273,34 @@ async def _fetch_url_text(url: str, timeout: float, headers: dict[str, str]) -> 
         return None, f"failed to fetch swagger spec at {url}: {exc}"
 
 
+
+
+def _extract_spec_urls_from_swagger_config(config_doc: dict[str, Any], config_url: str, base_url: str) -> list[str]:
+    urls: list[str] = []
+
+    direct = config_doc.get("url")
+    if isinstance(direct, str) and direct.strip():
+        urls.append(urljoin(config_url, direct.strip()))
+
+    listed = config_doc.get("urls")
+    if isinstance(listed, list):
+        for item in listed:
+            if isinstance(item, dict):
+                value = item.get("url")
+            else:
+                value = item
+            if isinstance(value, str) and value.strip():
+                urls.append(urljoin(config_url, value.strip()))
+
+    normalized: list[str] = []
+    seen: set[str] = set()
+    for raw in urls:
+        forms = normalize_url_forms(raw, base_url=base_url)
+        if forms.absolute in seen:
+            continue
+        seen.add(forms.absolute)
+        normalized.append(forms.absolute)
+    return normalized
 def _parse_spec_text(raw: str) -> dict[str, Any] | None:
     try:
         parsed = json.loads(raw)
@@ -303,6 +331,7 @@ def collect_from_swagger(
     metadata: dict[str, Any] = {
         "swagger_hits": [],
         "swagger_source_urls": [],
+        "swagger_config_urls": [],
         "swagger_candidate_count": 0,
     }
 
@@ -342,14 +371,40 @@ def collect_from_swagger(
     ]
 
     openapi_hits = [h for h in hits if h.kind in {"openapi-json", "openapi-yaml"}]
+    swagger_config_hits = [h for h in hits if h.kind == "swagger-config"]
     metadata["swagger_candidate_count"] = len(
         build_swagger_candidates(discovered_paths=discovered_paths, only_openapi=False, only_ui=False)
     )
 
-    observations: list[Observation] = []
-    for hit in openapi_hits:
-        metadata["swagger_source_urls"].append(hit.url)
+    candidate_spec_urls: list[str] = [h.url for h in openapi_hits]
+    for hit in swagger_config_hits:
         raw, warning = asyncio.run(_fetch_url_text(hit.url, timeout=timeout, headers=merged_headers))
+        if warning:
+            warnings.append(warning)
+            continue
+        if raw is None:
+            continue
+        config_doc = _parse_spec_text(raw)
+        if not isinstance(config_doc, dict):
+            warnings.append(f"unable to parse swagger config at {hit.url}")
+            continue
+        config_urls = _extract_spec_urls_from_swagger_config(config_doc=config_doc, config_url=hit.url, base_url=base_url)
+        metadata["swagger_config_urls"].extend(config_urls)
+        candidate_spec_urls.extend(config_urls)
+
+    deduped_spec_urls: list[str] = []
+    seen_spec_urls: set[str] = set()
+    for url in candidate_spec_urls:
+        forms = normalize_url_forms(url, base_url=base_url)
+        if forms.absolute in seen_spec_urls:
+            continue
+        seen_spec_urls.add(forms.absolute)
+        deduped_spec_urls.append(forms.absolute)
+
+    observations: list[Observation] = []
+    for spec_url in deduped_spec_urls:
+        metadata["swagger_source_urls"].append(spec_url)
+        raw, warning = asyncio.run(_fetch_url_text(spec_url, timeout=timeout, headers=merged_headers))
         if warning:
             warnings.append(warning)
             continue
@@ -357,8 +412,8 @@ def collect_from_swagger(
             continue
         spec_doc = _parse_spec_text(raw)
         if not spec_doc:
-            warnings.append(f"unable to parse swagger spec at {hit.url}")
+            warnings.append(f"unable to parse swagger spec at {spec_url}")
             continue
-        observations.extend(parse_openapi_document(spec_doc=spec_doc, spec_url=hit.url, base_url=base_url))
+        observations.extend(parse_openapi_document(spec_doc=spec_doc, spec_url=spec_url, base_url=base_url))
 
     return SwaggerIngestResult(observations=observations, metadata=metadata, warnings=warnings)
