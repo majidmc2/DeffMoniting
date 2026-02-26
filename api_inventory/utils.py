@@ -41,36 +41,6 @@ JWT_LIKE_RE = re.compile(r"\beyJ[a-zA-Z0-9_-]{10,}\.[a-zA-Z0-9._-]{10,}\.[a-zA-Z
 BEARER_RE = re.compile(r"(?i)\bBearer\s+[A-Za-z0-9._~+/-]+=*\b")
 URL_RE = re.compile(r"https?://[^\s'\"<>]+")
 PATH_RE = re.compile(r"(?<![A-Za-z0-9_])(/[A-Za-z0-9._~%/:-]+)")
-API_PATH_PATTERNS = (
-    r"/(api|apis)(?:/|$)",
-    r"/v[0-9]+(?:/|$)",
-    r"/(graphql|rest|rpc)(?:/|$)",
-    r"/(openapi|swagger|api-docs|docs-json)(?:/|$)",
-)
-NON_API_EXTENSIONS = {
-    ".js",
-    ".mjs",
-    ".css",
-    ".scss",
-    ".map",
-    ".png",
-    ".jpg",
-    ".jpeg",
-    ".gif",
-    ".svg",
-    ".ico",
-    ".woff",
-    ".woff2",
-    ".ttf",
-    ".eot",
-    ".pdf",
-    ".zip",
-    ".gz",
-    ".txt",
-    ".webp",
-    ".mp4",
-    ".mp3",
-}
 
 
 @dataclass
@@ -338,23 +308,6 @@ def extract_urls_and_paths(text: str) -> list[str]:
 
 def path_params_from_template(path: str) -> list[str]:
     return sorted(set(re.findall(r"{([^{}]+)}", path)))
-
-
-def is_probable_api_path(path: str) -> bool:
-    normalized = canonicalize_path(path).lower()
-    last_segment = normalized.rsplit("/", 1)[-1]
-    if "." in last_segment:
-        ext = "." + last_segment.rsplit(".", 1)[-1]
-        if ext in NON_API_EXTENSIONS:
-            return False
-
-    if any(re.search(pattern, normalized) for pattern in API_PATH_PATTERNS):
-        return True
-
-    # Keep extension-less paths that commonly appear as API routes.
-    if "." not in last_segment:
-        return True
-    return False
 
 
 async def fetch_robots_policy(
