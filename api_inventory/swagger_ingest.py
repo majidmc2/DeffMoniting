@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import re
 from dataclasses import dataclass
 from typing import Any
 from urllib.parse import urljoin
@@ -301,6 +302,46 @@ def _extract_spec_urls_from_swagger_config(config_doc: dict[str, Any], config_ur
         seen.add(forms.absolute)
         normalized.append(forms.absolute)
     return normalized
+
+
+def _extract_spec_urls_from_ui_document(raw: str, page_url: str, base_url: str) -> list[str]:
+    candidates: list[str] = []
+
+    patterns = [
+        r"(?:spec-url|specUrl)\s*=\s*['\"]([^'\"]+)['\"]",
+        r"(?:spec-url|specUrl)\s*:\s*['\"]([^'\"]+)['\"]",
+        r"\burl\s*:\s*['\"]([^'\"]+)['\"]",
+        r"['\"]url['\"]\s*:\s*['\"]([^'\"]+)['\"]",
+    ]
+    for pattern in patterns:
+        for value in re.findall(pattern, raw, flags=re.IGNORECASE):
+            cleaned = value.strip()
+            if cleaned:
+                candidates.append(cleaned)
+
+    for value in re.findall(r"['\"]urls['\"]\s*:\s*\[(.*?)\]", raw, flags=re.IGNORECASE | re.DOTALL):
+        for nested_url in re.findall(r"['\"]url['\"]\s*:\s*['\"]([^'\"]+)['\"]", value, flags=re.IGNORECASE):
+            cleaned = nested_url.strip()
+            if cleaned:
+                candidates.append(cleaned)
+
+    normalized: list[str] = []
+    seen: set[str] = set()
+    for candidate in candidates:
+        lowered = candidate.lower()
+        if lowered.startswith(("javascript:", "data:")):
+            continue
+        if "oauth2" in lowered or "validator" in lowered:
+            continue
+        forms = normalize_url_forms(urljoin(page_url, candidate), base_url=base_url)
+        absolute = forms.absolute
+        if absolute in seen:
+            continue
+        seen.add(absolute)
+        normalized.append(absolute)
+    return normalized
+
+
 def _parse_spec_text(raw: str) -> dict[str, Any] | None:
     try:
         parsed = json.loads(raw)
@@ -332,6 +373,7 @@ def collect_from_swagger(
         "swagger_hits": [],
         "swagger_source_urls": [],
         "swagger_config_urls": [],
+        "swagger_ui_urls": [],
         "swagger_candidate_count": 0,
     }
 
@@ -372,11 +414,24 @@ def collect_from_swagger(
 
     openapi_hits = [h for h in hits if h.kind in {"openapi-json", "openapi-yaml"}]
     swagger_config_hits = [h for h in hits if h.kind == "swagger-config"]
+    swagger_ui_hits = [h for h in hits if h.kind in {"swagger-ui", "redoc", "rapidoc", "scalar", "stoplight"}]
     metadata["swagger_candidate_count"] = len(
         build_swagger_candidates(discovered_paths=discovered_paths, only_openapi=False, only_ui=False)
     )
 
     candidate_spec_urls: list[str] = [h.url for h in openapi_hits]
+
+    for hit in swagger_ui_hits:
+        raw, warning = asyncio.run(_fetch_url_text(hit.url, timeout=timeout, headers=merged_headers))
+        if warning:
+            warnings.append(warning)
+            continue
+        if raw is None:
+            continue
+        ui_urls = _extract_spec_urls_from_ui_document(raw=raw, page_url=hit.url, base_url=base_url)
+        metadata["swagger_ui_urls"].extend(ui_urls)
+        candidate_spec_urls.extend(ui_urls)
+
     for hit in swagger_config_hits:
         raw, warning = asyncio.run(_fetch_url_text(hit.url, timeout=timeout, headers=merged_headers))
         if warning:
