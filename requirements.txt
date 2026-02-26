@@ -1,0 +1,5 @@
+aiohttp
+PyYAML
+playwright
+requests
+termcolor
