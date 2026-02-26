@@ -149,6 +149,39 @@ def run(args: argparse.Namespace) -> int:
         all_observations.extend(playwright_result.observations)
         warnings.extend(playwright_result.warnings)
 
+        discovered_paths = sorted({obs.path for obs in all_observations if getattr(obs, "path", "")})
+        swagger_followup = collect_from_swagger(
+            base_url=target_url,
+            timeout=args.timeout,
+            concurrency=args.concurrency,
+            user_agent=args.user_agent,
+            headers=headers,
+            discovered_paths=discovered_paths,
+        )
+        all_observations.extend(swagger_followup.observations)
+        warnings.extend(swagger_followup.warnings)
+
+        merged_hits = {
+            (item.get("url"), item.get("kind"), item.get("status")): item
+            for item in swagger_result.metadata.get("swagger_hits", []) + swagger_followup.metadata.get("swagger_hits", [])
+        }
+        merged_sources = sorted(
+            set(swagger_result.metadata.get("swagger_source_urls", []))
+            | set(swagger_followup.metadata.get("swagger_source_urls", []))
+        )
+        swagger_result.metadata = {
+            "swagger_hits": list(merged_hits.values()),
+            "swagger_source_urls": merged_sources,
+            "swagger_candidate_count": max(
+                int(swagger_result.metadata.get("swagger_candidate_count", 0)),
+                int(swagger_followup.metadata.get("swagger_candidate_count", 0)),
+            ),
+            "phases": [
+                {"name": "initial", "discovered_path_count": 0},
+                {"name": "post_playwright", "discovered_path_count": len(discovered_paths)},
+            ],
+        }
+
     redact_enabled = not args.no_redact
     endpoints = consolidate_observations(
         observations=all_observations,

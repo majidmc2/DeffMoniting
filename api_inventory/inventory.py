@@ -13,6 +13,7 @@ from .utils import (
     path_params_from_template,
     redact_headers,
     redact_url,
+    is_probable_api_path,
 )
 
 
@@ -246,6 +247,8 @@ def consolidate_observations(
             obs.path = forms.path
             obs.query_params = forms.query_params
         obs.path = canonicalize_path(obs.path)
+        if not is_probable_api_path(obs.path):
+            continue
         obs.method = normalize_method(obs.method)
         if not obs.timestamp:
             obs.timestamp = now_iso()

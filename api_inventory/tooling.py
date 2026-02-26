@@ -11,7 +11,7 @@ from typing import Any
 from urllib.parse import urljoin, urlparse
 
 from .inventory import Observation, observation_from_url
-from .utils import RobotsPolicy, extract_urls_and_paths
+from .utils import RobotsPolicy, extract_urls_and_paths, is_probable_api_path
 
 LOGGER = logging.getLogger(__name__)
 
@@ -148,18 +148,84 @@ def _filter_disallowed(
     return out
 
 
-def _collect_observations(candidates: list[str], source: str, base_url: str) -> list[Observation]:
+
+
+async def _probe_single_method(session: Any, url: str, timeout: float) -> list[str]:
+    methods: set[str] = set()
+
+    if aiohttp is None:
+        return ["GET"]
+
+    try:
+        async with session.options(url, timeout=aiohttp.ClientTimeout(total=timeout), allow_redirects=True, ssl=False) as resp:
+            allow = resp.headers.get("allow", "")
+            for entry in allow.split(","):
+                method = entry.strip().upper()
+                if method in HTTP_METHODS:
+                    methods.add(method)
+            if resp.status < 400 and not methods:
+                methods.add("OPTIONS")
+    except Exception:
+        pass
+
+    if methods:
+        return sorted(methods)
+
+    for method in ("HEAD", "GET"):
+        req = session.head if method == "HEAD" else session.get
+        try:
+            async with req(url, timeout=aiohttp.ClientTimeout(total=timeout), allow_redirects=True, ssl=False) as resp:
+                if resp.status < 500:
+                    return [method]
+        except Exception:
+            continue
+
+    return ["GET"]
+
+
+def _infer_methods_for_candidates(candidates: list[str], base_url: str, timeout: float, user_agent: str) -> dict[str, list[str]]:
+    if not candidates:
+        return {}
+    if aiohttp is None:
+        return {candidate: ["GET"] for candidate in candidates}
+
+    async def _run() -> dict[str, list[str]]:
+        timeout_cfg = aiohttp.ClientTimeout(total=timeout)
+        connector = aiohttp.TCPConnector(ssl=False, limit=20)
+        method_map: dict[str, list[str]] = {}
+        async with aiohttp.ClientSession(timeout=timeout_cfg, connector=connector, headers={"User-Agent": user_agent}) as session:
+            for candidate in candidates[:200]:
+                method_map[candidate] = await _probe_single_method(session, urljoin(base_url, candidate), timeout)
+        return method_map
+
+    try:
+        return asyncio.run(_run())
+    except Exception:
+        return {candidate: ["GET"] for candidate in candidates}
+
+
+def _collect_observations(
+    candidates: list[str],
+    source: str,
+    base_url: str,
+    method_map: dict[str, list[str]] | None = None,
+) -> list[Observation]:
     out: list[Observation] = []
     for candidate in candidates:
-        out.append(
-            observation_from_url(
-                url=candidate,
-                method="UNKNOWN",
-                source=source,
-                evidence=f"{source}:{candidate}",
-                base_url=base_url,
+        forms = urlparse(urljoin(base_url, candidate))
+        if not is_probable_api_path(forms.path or "/"):
+            continue
+        methods = (method_map or {}).get(candidate) or ["GET"]
+        for method in methods:
+            out.append(
+                observation_from_url(
+                    url=candidate,
+                    method=method,
+                    source=source,
+                    evidence=f"{source}:{method}:{candidate}",
+                    base_url=base_url,
+                )
             )
-        )
     return out
 
 
@@ -328,12 +394,14 @@ def discover_with_tools(
     )
     metadata["runs"].append(katana_meta)
     warnings.extend(katana_warn)
-    observations.extend(_collect_observations(katana_urls, source="katana", base_url=base_url))
+    katana_methods = _infer_methods_for_candidates(katana_urls, base_url=base_url, timeout=timeout, user_agent=user_agent)
+    observations.extend(_collect_observations(katana_urls, source="katana", base_url=base_url, method_map=katana_methods))
 
     js_urls, subjs_meta, subjs_warn = run_subjs(base_url=base_url, timeout=timeout, tools_dir=tools_dir)
     metadata["runs"].append(subjs_meta)
     warnings.extend(subjs_warn)
-    observations.extend(_collect_observations(js_urls, source="subjs", base_url=base_url))
+    js_methods = _infer_methods_for_candidates(js_urls, base_url=base_url, timeout=timeout, user_agent=user_agent)
+    observations.extend(_collect_observations(js_urls, source="subjs", base_url=base_url, method_map=js_methods))
 
     xnl_targets = [base_url] + js_urls[:20]
     xnl_candidates, xnl_meta, xnl_warn = run_xnlinkfinder(
@@ -345,6 +413,7 @@ def discover_with_tools(
     )
     metadata["runs"].append(xnl_meta)
     warnings.extend(xnl_warn)
-    observations.extend(_collect_observations(xnl_candidates, source="xnlinkfinder", base_url=base_url))
+    xnl_methods = _infer_methods_for_candidates(xnl_candidates, base_url=base_url, timeout=timeout, user_agent=user_agent)
+    observations.extend(_collect_observations(xnl_candidates, source="xnlinkfinder", base_url=base_url, method_map=xnl_methods))
 
     return ToolingResult(observations=observations, metadata=metadata, warnings=warnings)
