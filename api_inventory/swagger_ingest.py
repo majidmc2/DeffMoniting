@@ -3,9 +3,10 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import re
 from dataclasses import dataclass
 from typing import Any
-from urllib.parse import urljoin
+from urllib.parse import urljoin, urlparse
 
 from .inventory import Observation
 from .utils import normalize_url_forms, path_params_from_template
@@ -252,6 +253,34 @@ def parse_openapi_document(
     return observations
 
 
+def _extract_openapi_urls_from_ui(raw: str, source_url: str) -> list[str]:
+    urls: set[str] = set()
+
+    parsed = _parse_spec_text(raw)
+    if isinstance(parsed, dict):
+        direct = parsed.get("url")
+        if isinstance(direct, str) and direct.strip():
+            urls.add(urljoin(source_url, direct.strip()))
+
+        multiple = parsed.get("urls")
+        if isinstance(multiple, list):
+            for item in multiple:
+                if isinstance(item, dict) and isinstance(item.get("url"), str):
+                    urls.add(urljoin(source_url, item["url"].strip()))
+
+    for candidate in re.findall(r'["\']([^"\']*(?:openapi|swagger|api-docs|docs-json)[^"\']*)["\']', raw, flags=re.IGNORECASE):
+        parsed_candidate = urlparse(candidate)
+        if parsed_candidate.scheme in {"http", "https"} or candidate.startswith("/"):
+            urls.add(urljoin(source_url, candidate))
+
+    return sorted(urls)
+
+
+def _is_openapi_like_url(url: str) -> bool:
+    lowered = url.lower()
+    return any(hint in lowered for hint in ("openapi", "swagger", "api-docs", "docs-json"))
+
+
 async def _fetch_url_text(url: str, timeout: float, headers: dict[str, str]) -> tuple[str | None, str]:
     if aiohttp is None:
         return None, "aiohttp is not installed; cannot fetch swagger spec URLs"
@@ -341,15 +370,35 @@ def collect_from_swagger(
         for h in hits
     ]
 
-    openapi_hits = [h for h in hits if h.kind in {"openapi-json", "openapi-yaml"}]
     metadata["swagger_candidate_count"] = len(
         build_swagger_candidates(discovered_paths=discovered_paths, only_openapi=False, only_ui=False)
     )
 
     observations: list[Observation] = []
-    for hit in openapi_hits:
-        metadata["swagger_source_urls"].append(hit.url)
-        raw, warning = asyncio.run(_fetch_url_text(hit.url, timeout=timeout, headers=merged_headers))
+    queued_spec_urls: list[str] = []
+    for hit in hits:
+        if hit.kind in {"openapi-json", "openapi-yaml"}:
+            queued_spec_urls.append(hit.url)
+            continue
+
+        if hit.kind in {"swagger-ui", "redoc", "rapidoc", "scalar", "stoplight", "swagger-config", "api-reference", "doc-ui"}:
+            raw_ui, warning = asyncio.run(_fetch_url_text(hit.url, timeout=timeout, headers=merged_headers))
+            if warning:
+                warnings.append(warning)
+                continue
+            if not raw_ui:
+                continue
+            for discovered_spec in _extract_openapi_urls_from_ui(raw_ui, source_url=hit.url):
+                if _is_openapi_like_url(discovered_spec):
+                    queued_spec_urls.append(discovered_spec)
+
+    seen_urls: set[str] = set()
+    for spec_url in queued_spec_urls:
+        if spec_url in seen_urls:
+            continue
+        seen_urls.add(spec_url)
+        metadata["swagger_source_urls"].append(spec_url)
+        raw, warning = asyncio.run(_fetch_url_text(spec_url, timeout=timeout, headers=merged_headers))
         if warning:
             warnings.append(warning)
             continue
@@ -357,8 +406,8 @@ def collect_from_swagger(
             continue
         spec_doc = _parse_spec_text(raw)
         if not spec_doc:
-            warnings.append(f"unable to parse swagger spec at {hit.url}")
+            warnings.append(f"unable to parse swagger spec at {spec_url}")
             continue
-        observations.extend(parse_openapi_document(spec_doc=spec_doc, spec_url=hit.url, base_url=base_url))
+        observations.extend(parse_openapi_document(spec_doc=spec_doc, spec_url=spec_url, base_url=base_url))
 
     return SwaggerIngestResult(observations=observations, metadata=metadata, warnings=warnings)

@@ -13,7 +13,6 @@ from .diff import diff_inventories, render_diff_markdown
 from .inventory import build_inventory_document, consolidate_observations, now_iso
 from .playwright_capture import capture_with_playwright
 from .swagger_ingest import collect_from_swagger
-from .tooling import discover_with_tools
 from .utils import fetch_robots_policy, parse_header_kv
 
 LOGGER = logging.getLogger(__name__)
@@ -114,33 +113,25 @@ def run(args: argparse.Namespace) -> int:
     all_observations = []
     warnings: list[str] = []
 
+    tooling_result = {
+        "enabled": False,
+        "reason": "tool-based discovery disabled; playwright-only runtime capture is enforced",
+    }
+    playwright_result = None
+
+    discovered_paths: list[str] = []
     swagger_result = collect_from_swagger(
         base_url=target_url,
         timeout=args.timeout,
         concurrency=args.concurrency,
         user_agent=args.user_agent,
         headers=headers,
-        discovered_paths=None,
+        discovered_paths=discovered_paths,
     )
     all_observations.extend(swagger_result.observations)
     warnings.extend(swagger_result.warnings)
 
-    tooling_result = None
-    playwright_result = None
-
     if not args.only_swagger:
-        tooling_result = discover_with_tools(
-            base_url=target_url,
-            timeout=args.timeout,
-            max_pages=args.max_pages,
-            include_tools=args.include_tools,
-            robots=robots_policy if args.respect_robots else None,
-            user_agent=args.user_agent,
-            tools_dir="./tools",
-        )
-        all_observations.extend(tooling_result.observations)
-        warnings.extend(tooling_result.warnings)
-
         playwright_result = capture_with_playwright(
             base_url=target_url,
             include_playwright=args.include_playwright,
@@ -178,7 +169,7 @@ def run(args: argparse.Namespace) -> int:
             "max_body_bytes": args.max_body_bytes,
         },
         "swagger": swagger_result.metadata,
-        "tools": tooling_result.metadata if tooling_result else {"enabled": False},
+        "tools": tooling_result if isinstance(tooling_result, dict) else tooling_result.metadata,
         "playwright": playwright_result.metadata if playwright_result else {"enabled": False},
         "warnings": warnings,
     }
