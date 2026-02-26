@@ -113,7 +113,9 @@ def run(args: argparse.Namespace) -> int:
     all_observations = []
     warnings: list[str] = []
 
-    tooling_result = {
+    # NOTE: Non-Playwright tooling is intentionally disabled to avoid merge drift
+    # with branches that still carry legacy discover_with_tools wiring.
+    tooling_metadata: dict[str, Any] = {
         "enabled": False,
         "reason": "tool-based discovery disabled; playwright-only runtime capture is enforced",
     }
@@ -169,7 +171,7 @@ def run(args: argparse.Namespace) -> int:
             "max_body_bytes": args.max_body_bytes,
         },
         "swagger": swagger_result.metadata,
-        "tools": tooling_result if isinstance(tooling_result, dict) else tooling_result.metadata,
+        "tools": tooling_metadata,
         "playwright": playwright_result.metadata if playwright_result else {"enabled": False},
         "warnings": warnings,
     }
