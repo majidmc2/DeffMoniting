@@ -13,7 +13,6 @@ from .diff import diff_inventories, render_diff_markdown
 from .inventory import build_inventory_document, consolidate_observations, now_iso
 from .playwright_capture import capture_with_playwright
 from .swagger_ingest import collect_from_swagger
-from .tooling import discover_with_tools
 from .utils import fetch_robots_policy, parse_header_kv
 
 LOGGER = logging.getLogger(__name__)
@@ -65,7 +64,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--include-playwright", dest="include_playwright", action="store_true", default=True)
     parser.add_argument("--no-playwright", dest="include_playwright", action="store_false")
 
-    parser.add_argument("--include-tools", dest="include_tools", action="store_true", default=True)
+    parser.add_argument("--include-tools", dest="include_tools", action="store_true", default=False)
     parser.add_argument("--no-tools", dest="include_tools", action="store_false")
 
     parser.add_argument("--only-swagger", action="store_true", help="Run only swagger discovery/ingestion.")
@@ -117,18 +116,9 @@ def run(args: argparse.Namespace) -> int:
     tooling_result = None
     playwright_result = None
 
-    if not args.only_swagger:
-        tooling_result = discover_with_tools(
-            base_url=target_url,
-            timeout=args.timeout,
-            max_pages=args.max_pages,
-            include_tools=args.include_tools,
-            robots=robots_policy if args.respect_robots else None,
-            user_agent=args.user_agent,
-            tools_dir="./tools",
-        )
-        all_observations.extend(tooling_result.observations)
-        warnings.extend(tooling_result.warnings)
+    if args.include_tools:
+        warnings.append("Static discovery tools are disabled; only Playwright and Swagger ingestion are active.")
+    args.include_tools = False
 
     discovered_paths = [obs.path for obs in all_observations if getattr(obs, "path", "")]
     swagger_result = collect_from_swagger(
