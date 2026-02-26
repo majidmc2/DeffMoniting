@@ -48,9 +48,29 @@ API_PATH_PATTERNS = (
     r"/(openapi|swagger|api-docs|docs-json)(?:/|$)",
 )
 NON_API_EXTENSIONS = {
-    ".js", ".mjs", ".css", ".scss", ".map", ".png", ".jpg", ".jpeg", ".gif", ".svg",
-    ".ico", ".woff", ".woff2", ".ttf", ".eot", ".pdf", ".zip", ".gz", ".txt", ".webp",
-    ".mp4", ".mp3",
+    ".js",
+    ".mjs",
+    ".css",
+    ".scss",
+    ".map",
+    ".png",
+    ".jpg",
+    ".jpeg",
+    ".gif",
+    ".svg",
+    ".ico",
+    ".woff",
+    ".woff2",
+    ".ttf",
+    ".eot",
+    ".pdf",
+    ".zip",
+    ".gz",
+    ".txt",
+    ".xml",
+    ".webp",
+    ".mp4",
+    ".mp3",
 }
 
 
