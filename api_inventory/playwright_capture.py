@@ -7,7 +7,7 @@ from typing import Any
 from urllib.parse import urlparse
 
 from .inventory import Observation, now_iso
-from .utils import RobotsPolicy, cap_body_bytes, normalize_url_forms, path_params_from_template
+from .utils import RobotsPolicy, cap_body_bytes, is_probable_api_path, normalize_url_forms, path_params_from_template
 
 LOGGER = logging.getLogger(__name__)
 
@@ -121,9 +121,12 @@ async def _capture_async(
                     body_bytes = b""
 
                 forms = normalize_url_forms(req_url)
+                if not is_probable_api_path(forms.path):
+                    return
+
                 observations.append(
                     Observation(
-                        method=(request.method or "UNKNOWN").upper(),
+                        method=(request.method or "GET").upper(),
                         absolute_url=forms.absolute,
                         path=forms.path,
                         host=forms.host,

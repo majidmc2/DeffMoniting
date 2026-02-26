@@ -13,10 +13,10 @@ from .diff import diff_inventories, render_diff_markdown
 from .inventory import build_inventory_document, consolidate_observations, now_iso
 from .playwright_capture import capture_with_playwright
 from .swagger_ingest import collect_from_swagger
-from .tooling import discover_with_tools
 from .utils import fetch_robots_policy, parse_header_kv
 
 LOGGER = logging.getLogger(__name__)
+TOOL_DISCOVERY_ENABLED = False
 
 
 def _ensure_url(value: str) -> str:
@@ -65,8 +65,19 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--include-playwright", dest="include_playwright", action="store_true", default=True)
     parser.add_argument("--no-playwright", dest="include_playwright", action="store_false")
 
-    parser.add_argument("--include-tools", dest="include_tools", action="store_true", default=True)
-    parser.add_argument("--no-tools", dest="include_tools", action="store_false")
+    parser.add_argument(
+        "--include-tools",
+        dest="include_tools",
+        action="store_true",
+        default=False,
+        help="Deprecated: external tool discovery is disabled in this build.",
+    )
+    parser.add_argument(
+        "--no-tools",
+        dest="include_tools",
+        action="store_false",
+        help="Deprecated: external tool discovery is disabled in this build.",
+    )
 
     parser.add_argument("--only-swagger", action="store_true", help="Run only swagger discovery/ingestion.")
     parser.add_argument("--no-redact", action="store_true", help="Disable secret redaction.")
@@ -114,33 +125,30 @@ def run(args: argparse.Namespace) -> int:
     all_observations = []
     warnings: list[str] = []
 
+    if args.include_tools and not TOOL_DISCOVERY_ENABLED:
+        warnings.append("tool-based discovery is disabled; ignoring --include-tools")
+
+    # NOTE: Non-Playwright tooling is intentionally disabled to avoid merge drift
+    # with branches that still carry legacy discover_with_tools wiring.
+    tooling_metadata: dict[str, Any] = {
+        "enabled": False,
+        "reason": "tool-based discovery disabled; playwright-only runtime capture is enforced",
+    }
+    playwright_result = None
+
+    discovered_paths: list[str] = []
     swagger_result = collect_from_swagger(
         base_url=target_url,
         timeout=args.timeout,
         concurrency=args.concurrency,
         user_agent=args.user_agent,
         headers=headers,
-        discovered_paths=None,
+        discovered_paths=discovered_paths,
     )
     all_observations.extend(swagger_result.observations)
     warnings.extend(swagger_result.warnings)
 
-    tooling_result = None
-    playwright_result = None
-
     if not args.only_swagger:
-        tooling_result = discover_with_tools(
-            base_url=target_url,
-            timeout=args.timeout,
-            max_pages=args.max_pages,
-            include_tools=args.include_tools,
-            robots=robots_policy if args.respect_robots else None,
-            user_agent=args.user_agent,
-            tools_dir="./tools",
-        )
-        all_observations.extend(tooling_result.observations)
-        warnings.extend(tooling_result.warnings)
-
         playwright_result = capture_with_playwright(
             base_url=target_url,
             include_playwright=args.include_playwright,
@@ -155,6 +163,39 @@ def run(args: argparse.Namespace) -> int:
         )
         all_observations.extend(playwright_result.observations)
         warnings.extend(playwright_result.warnings)
+
+        discovered_paths = sorted({obs.path for obs in all_observations if getattr(obs, "path", "")})
+        swagger_followup = collect_from_swagger(
+            base_url=target_url,
+            timeout=args.timeout,
+            concurrency=args.concurrency,
+            user_agent=args.user_agent,
+            headers=headers,
+            discovered_paths=discovered_paths,
+        )
+        all_observations.extend(swagger_followup.observations)
+        warnings.extend(swagger_followup.warnings)
+
+        merged_hits = {
+            (item.get("url"), item.get("kind"), item.get("status")): item
+            for item in swagger_result.metadata.get("swagger_hits", []) + swagger_followup.metadata.get("swagger_hits", [])
+        }
+        merged_sources = sorted(
+            set(swagger_result.metadata.get("swagger_source_urls", []))
+            | set(swagger_followup.metadata.get("swagger_source_urls", []))
+        )
+        swagger_result.metadata = {
+            "swagger_hits": list(merged_hits.values()),
+            "swagger_source_urls": merged_sources,
+            "swagger_candidate_count": max(
+                int(swagger_result.metadata.get("swagger_candidate_count", 0)),
+                int(swagger_followup.metadata.get("swagger_candidate_count", 0)),
+            ),
+            "phases": [
+                {"name": "initial", "discovered_path_count": 0},
+                {"name": "post_playwright", "discovered_path_count": len(discovered_paths)},
+            ],
+        }
 
     redact_enabled = not args.no_redact
     endpoints = consolidate_observations(
@@ -171,6 +212,7 @@ def run(args: argparse.Namespace) -> int:
             "max_depth": args.max_depth,
             "include_playwright": args.include_playwright,
             "include_tools": args.include_tools,
+            "include_tools_effective": TOOL_DISCOVERY_ENABLED and args.include_tools,
             "only_swagger": args.only_swagger,
             "redaction_enabled": redact_enabled,
             "respect_robots": args.respect_robots,
@@ -178,7 +220,7 @@ def run(args: argparse.Namespace) -> int:
             "max_body_bytes": args.max_body_bytes,
         },
         "swagger": swagger_result.metadata,
-        "tools": tooling_result.metadata if tooling_result else {"enabled": False},
+        "tools": tooling_metadata,
         "playwright": playwright_result.metadata if playwright_result else {"enabled": False},
         "warnings": warnings,
     }
