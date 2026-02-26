@@ -114,17 +114,6 @@ def run(args: argparse.Namespace) -> int:
     all_observations = []
     warnings: list[str] = []
 
-    swagger_result = collect_from_swagger(
-        base_url=target_url,
-        timeout=args.timeout,
-        concurrency=args.concurrency,
-        user_agent=args.user_agent,
-        headers=headers,
-        discovered_paths=None,
-    )
-    all_observations.extend(swagger_result.observations)
-    warnings.extend(swagger_result.warnings)
-
     tooling_result = None
     playwright_result = None
 
@@ -141,6 +130,19 @@ def run(args: argparse.Namespace) -> int:
         all_observations.extend(tooling_result.observations)
         warnings.extend(tooling_result.warnings)
 
+    discovered_paths = [obs.path for obs in all_observations if getattr(obs, "path", "")]
+    swagger_result = collect_from_swagger(
+        base_url=target_url,
+        timeout=args.timeout,
+        concurrency=args.concurrency,
+        user_agent=args.user_agent,
+        headers=headers,
+        discovered_paths=discovered_paths,
+    )
+    all_observations.extend(swagger_result.observations)
+    warnings.extend(swagger_result.warnings)
+
+    if not args.only_swagger:
         playwright_result = capture_with_playwright(
             base_url=target_url,
             include_playwright=args.include_playwright,
